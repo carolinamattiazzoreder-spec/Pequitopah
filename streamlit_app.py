@@ -1,422 +1,345 @@
+
 import streamlit as st
+import pandas as pd
 from datetime import datetime, timedelta
+import json
+import os
 
-# Set page config
-st.set_page_config(
-    page_title="Pequitopah Randomizer - Agenda de Restaurantes 🍽️",
-    page_icon="🍽️",
-    layout="wide"
-)
+# Configuração da página
+st.set_page_config(page_title="Pequitopah", page_icon="📅", layout="wide")
 
-# Custom CSS with centered layout and container styling
-st.markdown("""
-<style>
-    .main-title {
-        text-align: center;
-        color: #123458;
-        font-size: 2.2rem;
-        margin-bottom: 2rem;
-        font-weight: bold;
+# Título
+st.title("📅 Pequitopah")
+st.markdown("---")
+
+# Configuração da fila - Pavel é o primeiro
+queue_names = ["Pavel", "Guilherme", "Victor", "Chris", "Alan", "Thiago", "Clayton", "Carolina"]
+start_date = datetime(2025, 10, 13)  # 13 de outubro, 2025 (início do Pavel)
+pavel_index = queue_names.index("Pavel")  # Pavel está no índice 0
+
+# Regras de dias que cada pessoa não trabalha
+DEFAULT_SKIP_RULES = {
+    "Pavel": [1],  # Terça-feira (0=segunda, 1=terça, etc.)
+    "Guilherme": [4],  # Sexta-feira
+    "Victor": [4],  # Sexta-feira  
+    "Carolina": [4],  # Sexta-feira
+    "Chris": [],
+    "Alan": [],
+    "Thiago": [],
+    "Clayton": []
+}
+
+# Arquivos para salvar dados
+ADJUSTMENTS_FILE = "queue_adjustments.json"
+RULES_FILE = "skip_rules.json"
+
+def load_adjustments():
+    """Carrega ajustes salvos (pessoas puladas ou trocadas)"""
+    if os.path.exists(ADJUSTMENTS_FILE):
+        with open(ADJUSTMENTS_FILE, 'r') as f:
+            return json.load(f)
+    return {"skipped": {}, "switches": {}}
+
+def save_adjustments(adjustments):
+    """Salva ajustes no arquivo"""
+    with open(ADJUSTMENTS_FILE, 'w') as f:
+        json.dump(adjustments, f)
+
+def load_skip_rules():
+    """Carrega regras de dias que pessoas não trabalham"""
+    if os.path.exists(RULES_FILE):
+        with open(RULES_FILE, 'r') as f:
+            return json.load(f)
+    return DEFAULT_SKIP_RULES.copy()
+
+def save_skip_rules(rules):
+    """Salva regras de dias"""
+    with open(RULES_FILE, 'w') as f:
+        json.dump(rules, f)
+
+def is_weekday(date):
+    """Verifica se a data é um dia útil (segunda a sexta)"""
+    return date.weekday() < 5
+
+def get_next_weekday(date):
+    """Obtém o próximo dia útil"""
+    while not is_weekday(date):
+        date += timedelta(days=1)
+    return date
+
+def count_weekdays_between(start_date, end_date):
+    """Conta quantos dias úteis existem entre duas datas"""
+    count = 0
+    current_date = start_date
+    while current_date <= end_date:
+        if is_weekday(current_date):
+            count += 1
+        current_date += timedelta(days=1)
+    return count
+
+def should_skip_by_rule(person, date, skip_rules):
+    """Verifica se a pessoa deve ser pulada por regra de dia da semana"""
+    if person in skip_rules:
+        return date.weekday() in skip_rules[person]
+    return False
+
+def get_person_for_date(target_date, adjustments, skip_rules):
+    """Obtém a pessoa designada para uma data específica"""
+    target_date = get_next_weekday(target_date) if not is_weekday(target_date) else target_date
+
+    # Verificar se há troca específica para esta data
+    date_str = target_date.strftime("%Y-%m-%d")
+    if date_str in adjustments.get("switches", {}):
+        return adjustments["switches"][date_str]
+
+    # Verificar se a pessoa está pulada manualmente nesta data
+    if date_str in adjustments.get("skipped", {}):
+        skipped_person = adjustments["skipped"][date_str]
+        weekdays_since_start = count_weekdays_between(start_date.date(), target_date) - 1
+        person_index = (pavel_index + weekdays_since_start) % len(queue_names)
+
+        attempts = 0
+        while (queue_names[person_index] == skipped_person or 
+               should_skip_by_rule(queue_names[person_index], target_date, skip_rules)) and attempts < len(queue_names):
+            person_index = (person_index + 1) % len(queue_names)
+            attempts += 1
+
+        return queue_names[person_index]
+
+    # Cálculo normal com regras de dias
+    weekdays_since_start = count_weekdays_between(start_date.date(), target_date) - 1
+    person_index = (pavel_index + weekdays_since_start) % len(queue_names)
+
+    # Verificar regras de dias da semana
+    attempts = 0
+    while should_skip_by_rule(queue_names[person_index], target_date, skip_rules) and attempts < len(queue_names):
+        person_index = (person_index + 1) % len(queue_names)
+        attempts += 1
+
+    return queue_names[person_index]
+
+def get_cycle_info(target_date):
+    """Obtém informações sobre o ciclo para uma data"""
+    weekdays_since_start = count_weekdays_between(start_date.date(), target_date) - 1
+    current_cycle_day = ((weekdays_since_start) % len(queue_names)) + 1
+    return current_cycle_day
+
+# Carregar dados
+if 'adjustments' not in st.session_state:
+    st.session_state.adjustments = load_adjustments()
+if 'skip_rules' not in st.session_state:
+    st.session_state.skip_rules = load_skip_rules()
+
+adjustments = st.session_state.adjustments
+skip_rules = st.session_state.skip_rules
+
+# Data atual
+today = datetime.now().date()
+today_weekday = get_next_weekday(today) if not is_weekday(today) else today
+
+st.info(f"**Hoje:** {today.strftime('%d/%m/%Y')}")
+
+# Status atual
+current_person = get_person_for_date(today_weekday, adjustments, skip_rules)
+st.success(f"## 🎯 **{current_person}** é sua vez de escolher o restaurante!")
+
+# Layout principal com controles na direita
+col_main, col_controls = st.columns([0.72, 0.28])  # 72% para conteúdo principal, 28% para controles
+
+with col_main:
+    # Próximos dias
+    st.markdown("### 📋 Próximos Dias")
+
+    # Slider para dias na área principal
+    days_to_show = st.slider("Dias para mostrar:", min_value=5, max_value=30, value=12, help="Quantidade de dias para mostrar")
+
+    queue_data = []
+    current_date = today_weekday
+
+    for i in range(days_to_show):
+        person = get_person_for_date(current_date, adjustments, skip_rules)
+        cycle_day = get_cycle_info(current_date)
+
+        # Verificar se é início de novo ciclo
+        new_cycle_marker = ""
+        if cycle_day == 1 and i > 0:
+            new_cycle_marker = " 🔄"
+
+        # Verificar se há ajustes para esta data  
+        date_str = current_date.strftime("%Y-%m-%d")
+        adjustments_info = ""
+        if date_str in adjustments.get("skipped", {}):
+            adjustments_info = " (Manual)"
+        elif date_str in adjustments.get("switches", {}):
+            adjustments_info = " (Trocado)"
+
+        # Verificar se foi pulado por regra
+        original_person_index = (pavel_index + count_weekdays_between(start_date.date(), current_date) - 1) % len(queue_names)
+        original_person = queue_names[original_person_index]
+        if should_skip_by_rule(original_person, current_date, skip_rules) and person != original_person:
+            adjustments_info = " (Regra)"
+
+        queue_data.append({
+            "Data": current_date.strftime("%d/%m"),
+            "Dia": current_date.strftime("%A"),
+            "Pessoa": person + new_cycle_marker + adjustments_info
+        })
+
+        current_date = get_next_weekday(current_date + timedelta(days=1))
+
+    df_queue = pd.DataFrame(queue_data)
+
+    # Traduzir nomes dos dias
+    day_translation = {
+        "Monday": "Segunda", "Tuesday": "Terça", "Wednesday": "Quarta",
+        "Thursday": "Quinta", "Friday": "Sexta"
     }
 
-    /* Centered container for all blocks */
-    .blocks-wrapper {
-        max-width: 1400px;
-        margin: 0 auto;
-        padding: 0 2rem;
-    }
+    df_queue["Dia"] = df_queue["Dia"].map(day_translation)
 
-    /* Individual block containers */
-    .block-container {
-        background: linear-gradient(135deg, #F1EFEC, #D4C9BE);
-        border: 3px solid #123458;
-        border-radius: 20px;
-        padding: 2rem;
-        margin-bottom: 2rem;
-        box-shadow: 0 8px 24px rgba(0,0,0,0.1);
-    }
-
-    .block-header {
-        background: linear-gradient(135deg, #D4C9BE, #123458);
-        color: white;
-        padding: 1rem;
-        border-radius: 15px;
-        text-align: center;
-        margin-bottom: 1.5rem;
-        font-weight: bold;
-        font-size: 1.3rem;
-    }
-
-    /* Entry card styling */
-    .entry-card {
-        background: #F1EFEC;
-        border: 2px solid #D4C9BE;
-        border-radius: 12px;
-        padding: 1.5rem;
-        margin-bottom: 1rem;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-        position: relative;
-    }
-
-    .today-card {
-        background: #123458 !important;
-        color: #F1EFEC !important;
-        border: 2px solid #123458 !important;
-        box-shadow: 0 4px 12px rgba(18,52,88,0.3) !important;
-    }
-
-    .skipped-card {
-        background: #f0f0f0 !important;
-        color: #888 !important;
-        border: 2px dashed #ccc !important;
-        opacity: 0.6;
-    }
-
-    .entry-header {
-        font-size: 1.1rem;
-        font-weight: bold;
-        margin-bottom: 0.8rem;
-        color: #123458;
-        padding: 0.8rem;
-        background: rgba(212, 201, 190, 0.2);
-        border-radius: 8px;
-    }
-
-    .today-card .entry-header {
-        color: #F1EFEC !important;
-        background: rgba(241, 239, 236, 0.1) !important;
-    }
-
-    .skipped-card .entry-header {
-        color: #888 !important;
-        background: rgba(200, 200, 200, 0.2) !important;
-        text-decoration: line-through;
-    }
-
-    .restaurant-display {
-        background: rgba(212, 201, 190, 0.3);
-        padding: 0.8rem;
-        border-radius: 8px;
-        margin-bottom: 0.8rem;
-        font-style: italic;
-        color: #123458;
-    }
-
-    .today-card .restaurant-display {
-        background: rgba(241, 239, 236, 0.15) !important;
-        color: #F1EFEC !important;
-    }
-
-    .skipped-card .restaurant-display {
-        background: rgba(200, 200, 200, 0.15) !important;
-        color: #888 !important;
-    }
-
-    /* Button styling */
-    .action-buttons {
-        display: flex;
-        gap: 0.5rem;
-        margin-top: 0.8rem;
-    }
-
-    .today-card .stTextInput input {
-        background-color: rgba(241, 239, 236, 0.1) !important;
-        color: #F1EFEC !important;
-        border-color: rgba(241, 239, 236, 0.3) !important;
-    }
-
-    .today-card .stTextInput label {
-        color: #F1EFEC !important;
-    }
-
-    .skipped-card .stTextInput input {
-        background-color: rgba(200, 200, 200, 0.1) !important;
-        color: #888 !important;
-    }
-
-    .footer-section {
-        text-align: center;
-        margin-top: 3rem;
-        padding: 2rem 0;
-        border-top: 2px solid #D4C9BE;
-    }
-
-    /* Responsive design */
-    @media (max-width: 768px) {
-        .blocks-wrapper {
-            padding: 0 1rem;
-        }
-        .block-container {
-            padding: 1.5rem;
-        }
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# Helper functions
-def proximo_dia_util(data):
-    """Calculate next business day"""
-    dia = data.weekday()  # Monday=0, Sunday=6
-    if dia == 4:  # Friday -> +3 (Monday)
-        data = data + timedelta(days=3)
-    elif dia == 5:  # Saturday -> +2 (Monday)
-        data = data + timedelta(days=2)  
-    elif dia == 6:  # Sunday -> +1 (Monday)
-        data = data + timedelta(days=1)
-    else:  # Weekday -> +1
-        data = data + timedelta(days=1)
-    return data
-
-def formatar_data(date):
-    """Format date in Portuguese"""
-    dias_semana = ['segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado', 'domingo']
-    dd = date.strftime('%d')
-    mm = date.strftime('%m') 
-    yyyy = date.strftime('%Y')
-    dia_nome = dias_semana[date.weekday()]
-    return f"{dd}/{mm}/{yyyy} ({dia_nome})"
-
-def calcular_bloco_com_constraints(titulo, nomes, data_inicio, starting_queue_index=0, skipped_entries=None, switched_entries=None):
-    """Calculate block assignments with constraints, skip and switch logic"""
-    if skipped_entries is None:
-        skipped_entries = set()
-    if switched_entries is None:
-        switched_entries = {}
-
-    data = data_inicio
-    entries = []
-    available_people = nomes.copy()
-    queue_index = starting_queue_index
-    date_index = 0
-    max_dates = 70
-
-    while len(entries) < len(nomes) and date_index < max_dates:
-        data_iso = data.strftime('%Y-%m-%d')
-        assigned_person = None
-        assigned_index = None
-        entry_key = f"{titulo}__{len(entries) + 1}__{data_iso}"
-
-        # Check if this entry should be skipped
-        if entry_key in skipped_entries:
-            entries.append({
-                'titulo': titulo,
-                'idx': len(entries) + 1,
-                'nome': "PULADO",
-                'data': data,
-                'data_iso': data_iso,
-                'data_label': formatar_data(data),
-                'key': f"rest__PULADO__{data_iso}",
-                'entry_key': entry_key,
-                'skipped': True
-            })
-            data = proximo_dia_util(data)
-            date_index += 1
-            continue
-
-        # Check if this entry has been switched
-        if entry_key in switched_entries:
-            assigned_person = switched_entries[entry_key]
-            # Remove from available people if present
-            if assigned_person in available_people:
-                available_people.remove(assigned_person)
+    def highlight_today_row(s):
+        if s.name == 0:
+            return ['background-color: #90EE90; font-weight: bold'] * len(s)
         else:
-            # Normal assignment logic
-            for i in range(len(available_people)):
-                candidate_index = (queue_index + i) % len(available_people)
-                candidate = available_people[candidate_index]
+            return [''] * len(s)
 
-                # If Pavel would be assigned on Tuesday, try to find Guilherme to switch
-                if candidate.lower() == 'pavel' and data.weekday() == 1:  # Tuesday = 1
-                    guilherme_index = next((idx for idx, person in enumerate(available_people) if person.lower() == 'guilherme'), -1)
-                    if guilherme_index != -1:
-                        assigned_person = 'Guilherme'
-                        assigned_index = guilherme_index
-                        break
-                    continue
+    st.dataframe(
+        df_queue.style.apply(highlight_today_row, axis=1), 
+        use_container_width=True,
+        hide_index=True
+    )
 
-                assigned_person = candidate
-                assigned_index = candidate_index
+    st.caption("🔄 = Novo ciclo | (Regra) = Pulado por regra | (Manual) = Pulado manualmente | (Trocado) = Troca manual")
+
+with col_controls:
+    st.markdown("### ⚙️ Controles")
+
+    # Botões empilhados verticalmente
+    if st.button("🚫 Pular pessoa\nde hoje", type="secondary", use_container_width=True):
+        date_str = today_weekday.strftime("%Y-%m-%d")
+        st.session_state.adjustments["skipped"][date_str] = current_person
+        save_adjustments(st.session_state.adjustments)
+        st.rerun()
+
+    next_weekday = get_next_weekday(today_weekday + timedelta(days=1))
+    next_person = get_person_for_date(next_weekday, adjustments, skip_rules)
+
+    if st.button(f"🔄 Trocar\n{current_person[:8]}... ↔ {next_person[:8]}...", type="secondary", use_container_width=True):
+        today_str = today_weekday.strftime("%Y-%m-%d")
+        next_str = next_weekday.strftime("%Y-%m-%d")
+
+        st.session_state.adjustments["switches"][today_str] = next_person
+        st.session_state.adjustments["switches"][next_str] = current_person
+        save_adjustments(st.session_state.adjustments)
+        st.rerun()
+
+    if st.button("🗑️ Limpar\najustes", use_container_width=True):
+        st.session_state.adjustments = {"skipped": {}, "switches": {}}
+        save_adjustments(st.session_state.adjustments)
+        if os.path.exists(ADJUSTMENTS_FILE):
+            os.remove(ADJUSTMENTS_FILE)
+        st.rerun()
+
+    st.markdown("---")
+
+    # Configuração de regras mais compacta
+    with st.expander("📋 Regras"):
+        st.markdown("**Dias que não trabalham:**")
+
+        day_names = ["Seg", "Ter", "Qua", "Qui", "Sex"]
+
+        for person in queue_names:
+            current_skip_days = [day_names[day] for day in skip_rules.get(person, [])]
+            selected_days = st.multiselect(
+                f"{person[:6]}:", 
+                day_names, 
+                default=current_skip_days,
+                key=f"skip_{person}",
+                help=f"Dias que {person} não trabalha"
+            )
+            skip_rules[person] = [day_names.index(day) for day in selected_days]
+
+        if st.button("💾 Salvar", use_container_width=True):
+            st.session_state.skip_rules = skip_rules
+            save_skip_rules(skip_rules)
+            st.success("✅ Salvo!")
+            st.rerun()
+
+# Tabela de previsões (largura total)
+st.markdown("### 🔮 Previsões")
+
+prediction_days = st.slider("Previsão para próximos dias:", min_value=15, max_value=60, value=30)
+
+prediction_data = []
+for person in queue_names:
+    next_dates = []
+    search_date = today_weekday
+
+    # Encontrar próximas 3 datas da pessoa
+    for _ in range(prediction_days):
+        if get_person_for_date(search_date, adjustments, skip_rules) == person:
+            days_until = count_weekdays_between(today_weekday, search_date) - 1
+            if person == current_person and search_date == today_weekday:
+                next_dates.append("Hoje")
+            else:
+                next_dates.append(f"{search_date.strftime('%d/%m')} (em {days_until} dias)")
+
+            if len(next_dates) >= 3:
                 break
 
-            if assigned_person is not None and assigned_index is not None:
-                available_people.pop(assigned_index)
-                if queue_index >= len(available_people) and len(available_people) > 0:
-                    queue_index = 0
+        search_date = get_next_weekday(search_date + timedelta(days=1))
 
-        if assigned_person is not None:
-            entries.append({
-                'titulo': titulo,
-                'idx': len(entries) + 1,
-                'nome': assigned_person,
-                'data': data,
-                'data_iso': data_iso,
-                'data_label': formatar_data(data),
-                'key': f"rest__{assigned_person}__{data_iso}",
-                'entry_key': entry_key,
-                'skipped': False
-            })
+    # Preencher com N/A se não encontrou 3 datas
+    while len(next_dates) < 3:
+        next_dates.append("N/A")
 
-        data = proximo_dia_util(data)
-        date_index += 1
+    # Verificar regras de dias
+    skip_days = [["Segunda", "Terça", "Quarta", "Quinta", "Sexta"][day] for day in skip_rules.get(person, [])]
+    skip_info = ", ".join(skip_days) if skip_days else "Nenhum"
 
-    final_queue_index = queue_index % len(nomes) if len(nomes) > 0 else 0
-    return entries, data, final_queue_index
+    prediction_data.append({
+        "Pessoa": person,
+        "Próxima": next_dates[0],
+        "Seguinte": next_dates[1], 
+        "Depois": next_dates[2],
+        "Não Trabalha": skip_info
+    })
 
-def should_shift_blocks():
-    """Check if blocks should be shifted based on current date"""
-    base_date = datetime(2025, 9, 29)  # September 29, 2025
-    today = datetime.now()
-    nomes = ["Pavel", "Guilherme", "Victor", "Chris", "Alan", "Thiago", "Clayton", "Carolina"]
+df_predictions = pd.DataFrame(prediction_data)
 
-    entries, data_fim, _ = calcular_bloco_com_constraints("Bloco 1", nomes, base_date, 0)
-    return today >= data_fim
-
-def get_shifted_start_date():
-    """Get the appropriate start date considering shifts"""
-    base_date = datetime(2025, 9, 29)
-    nomes = ["Pavel", "Guilherme", "Victor", "Chris", "Alan", "Thiago", "Clayton", "Carolina"]
-
-    if should_shift_blocks():
-        entries, data_fim, _ = calcular_bloco_com_constraints("Bloco 1", nomes, base_date, 0)
-        return data_fim
-    return base_date
-
-# Initialize session state
-if 'restaurants' not in st.session_state:
-    st.session_state.restaurants = {}
-if 'skipped_entries' not in st.session_state:
-    st.session_state.skipped_entries = set()
-if 'switched_entries' not in st.session_state:
-    st.session_state.switched_entries = {}
-
-def skip_entry(entry_key):
-    """Skip an entry"""
-    st.session_state.skipped_entries.add(entry_key)
-    st.rerun()
-
-def switch_with_next(current_entry, entries, block_num):
-    """Switch current entry with next available person"""
-    current_idx = current_entry['idx'] - 1  # Convert to 0-based index
-    if current_idx + 1 < len(entries):
-        next_entry = entries[current_idx + 1]
-        if not next_entry.get('skipped', False):
-            # Perform the switch
-            current_key = current_entry['entry_key']
-            next_key = next_entry['entry_key']
-
-            st.session_state.switched_entries[current_key] = next_entry['nome']
-            st.session_state.switched_entries[next_key] = current_entry['nome']
-            st.rerun()
-
-def render_entry(entry, is_today, block_num, entries):
-    """Render a single entry with proper styling and action buttons"""
-    is_skipped = entry.get('skipped', False)
-
-    if is_skipped:
-        card_class = "skipped-card"
-    elif is_today:
-        card_class = "today-card"
+# Destacar pessoa atual
+def highlight_current_person(s):
+    if s["Pessoa"] == current_person:
+        return ['background-color: #E8F4FD; font-weight: bold'] * len(s)
     else:
-        card_class = "entry-card"
+        return [''] * len(s)
 
-    # Create the card HTML structure
-    st.markdown(f"""
-    <div class="{card_class}">
-        <div class="entry-header">
-            {entry["idx"]}. {entry["nome"]} — {entry["data_label"]}
-            {" (PULADO)" if is_skipped else ""}
-        </div>
-        {f'<div class="restaurant-display">🍽️ Restaurante: {st.session_state.restaurants.get(entry["key"], "")}</div>' 
-          if st.session_state.restaurants.get(entry["key"], "") and not is_skipped else ""}
-    </div>
-    """, unsafe_allow_html=True)
+st.dataframe(
+    df_predictions.style.apply(highlight_current_person, axis=1),
+    use_container_width=True,
+    hide_index=True
+)
 
-    if not is_skipped:
-        # Action buttons
-        col1, col2, col3 = st.columns([1, 1, 2])
+# Mostrar ajustes ativos se houver
+if adjustments["skipped"] or adjustments["switches"]:
+    st.markdown("---")
+    st.markdown("### 📝 Alterações Ativas")
 
-        with col1:
-            if st.button("⏭️ Pular", key=f"skip_{entry['entry_key']}", help="Pular esta pessoa"):
-                skip_entry(entry['entry_key'])
+    col1, col2 = st.columns(2)
 
-        with col2:
-            if st.button("🔄 Trocar", key=f"switch_{entry['entry_key']}", help="Trocar com próxima pessoa"):
-                switch_with_next(entry, entries, block_num)
+    with col1:
+        if adjustments["skipped"]:
+            st.markdown("**Pessoas Puladas (Manual):**")
+            for date_str, person in adjustments["skipped"].items():
+                date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
+                st.write(f"• {date_obj.strftime('%d/%m')}: {person}")
 
-        # Restaurant input
-        restaurant_key = entry['key']
-        current_restaurant = st.session_state.restaurants.get(restaurant_key, "")
-        input_key = f"restaurant_{block_num}_{entry['idx']}_{entry['nome']}_{entry['data_iso']}"
-
-        new_restaurant = st.text_input(
-            "Restaurante:",
-            value=current_restaurant,
-            key=input_key,
-            placeholder="Digite o restaurante...",
-            label_visibility="collapsed"
-        )
-
-        # Update session state
-        if new_restaurant != current_restaurant:
-            st.session_state.restaurants[restaurant_key] = new_restaurant
-            st.rerun()
-
-    else:
-        st.info("Esta entrada foi pulada")
-
-def main():
-    # Title
-    st.markdown('<h1 class="main-title">Pequitopah Melhor APP do Mundo 🍽️</h1>', unsafe_allow_html=True)
-
-    # Centered wrapper
-    st.markdown('<div class="blocks-wrapper">', unsafe_allow_html=True)
-
-    # Calculate cycles
-    nomes = ["Pavel", "Guilherme", "Victor", "Chris", "Alan", "Thiago", "Clayton", "Carolina"]
-    ciclos = 3
-    data_atual = get_shifted_start_date()
-    current_queue_index = 0
-    today_iso = datetime.now().strftime('%Y-%m-%d')
-
-    # Create each block in its own container
-    for i in range(1, ciclos + 1):
-        entries, data_fim, next_queue_index = calcular_bloco_com_constraints(
-            f"Bloco {i}", 
-            nomes, 
-            data_atual, 
-            current_queue_index,
-            st.session_state.skipped_entries,
-            st.session_state.switched_entries
-        )
-
-        # Block container
-        with st.container():
-            st.markdown('<div class="block-container">', unsafe_allow_html=True)
-
-            # Block header
-            st.markdown(f'<div class="block-header">Bloco {i}</div>', unsafe_allow_html=True)
-
-            # Render entries
-            for entry in entries:
-                is_today = entry['data_iso'] == today_iso and not entry.get('skipped', False)
-                render_entry(entry, is_today, i, entries)
-                st.write("")  # Add spacing
-
-            st.markdown('</div>', unsafe_allow_html=True)
-
-        data_atual = data_fim  
-        current_queue_index = next_queue_index
-
-    st.markdown('</div>', unsafe_allow_html=True)  # Close wrapper
-
-    # Footer
-    st.markdown('<div class="footer-section">', unsafe_allow_html=True)
-    st.image(
-        "https://media1.giphy.com/media/v1.Y2lkPTc5MGI3NjExNzE0d24wZzEzcG4yZG05aDBwZ3R3M21la2o1M2EwejI4c25iaTM3cCZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/SAAMcPRfQpgyI/giphy.gif",
-        width=220,
-        caption="Desenvolvido para o melhor almoço do escritório! 😄"
-    )
-    st.markdown('</div>', unsafe_allow_html=True)
-
-if __name__ == "__main__":
-    main()
+    with col2:
+        if adjustments["switches"]:
+            st.markdown("**Trocas Feitas:**")
+            processed_switches = set()
+            for date_str, person in adjustments["switches"].items():
+                if date_str not in processed_switches:
+                    date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
+                    st.write(f"• {date_obj.strftime('%d/%m')}: {person}")
+                    processed_switches.add(date_str)
