@@ -12,10 +12,10 @@ st.set_page_config(page_title="Pequitopah", page_icon="📅", layout="wide")
 st.title("📅 Pequitopah")
 st.markdown("---")
 
-# Configuração da fila - Pavel é o primeiro
+# Configuração da fila - Pavel é o primeiro no ciclo, mas Alan começou em 15/10
 queue_names = ["Pavel", "Guilherme", "Victor", "Chris", "Alan", "Thiago", "Clayton", "Carolina"]
-start_date = datetime(2025, 10, 13)  # 13 de outubro, 2025 (início do Pavel)
-pavel_index = queue_names.index("Pavel")  # Pavel está no índice 0
+start_date = datetime(2025, 10, 15)  # 15 de outubro, 2025 (Alan começou neste dia)
+alan_index = queue_names.index("Alan")  # Alan está no índice 4
 
 # Regras de dias que cada pessoa não trabalha
 DEFAULT_SKIP_RULES = {
@@ -95,8 +95,9 @@ def get_person_for_date(target_date, adjustments, skip_rules):
     # Verificar se a pessoa está pulada manualmente nesta data
     if date_str in adjustments.get("skipped", {}):
         skipped_person = adjustments["skipped"][date_str]
+        # Alan começou em 15/10, então usamos alan_index como base
         weekdays_since_start = count_weekdays_between(start_date.date(), target_date) - 1
-        person_index = (pavel_index + weekdays_since_start) % len(queue_names)
+        person_index = (alan_index + weekdays_since_start) % len(queue_names)
 
         attempts = 0
         while (queue_names[person_index] == skipped_person or 
@@ -106,9 +107,9 @@ def get_person_for_date(target_date, adjustments, skip_rules):
 
         return queue_names[person_index]
 
-    # Cálculo normal com regras de dias
+    # Cálculo normal com regras de dias - Alan começou, fila volta para Pavel
     weekdays_since_start = count_weekdays_between(start_date.date(), target_date) - 1
-    person_index = (pavel_index + weekdays_since_start) % len(queue_names)
+    person_index = (alan_index + weekdays_since_start) % len(queue_names)
 
     # Verificar regras de dias da semana
     attempts = 0
@@ -121,8 +122,14 @@ def get_person_for_date(target_date, adjustments, skip_rules):
 def get_cycle_info(target_date):
     """Obtém informações sobre o ciclo para uma data"""
     weekdays_since_start = count_weekdays_between(start_date.date(), target_date) - 1
-    current_cycle_day = ((weekdays_since_start) % len(queue_names)) + 1
-    return current_cycle_day
+    # Calcular posição no ciclo baseado no Alan como início
+    current_cycle_position = (alan_index + weekdays_since_start) % len(queue_names)
+    # Converter para posição do ciclo (1-8) onde Pavel = 1
+    if current_cycle_position >= alan_index:
+        cycle_day = current_cycle_position - alan_index + 1
+    else:
+        cycle_day = len(queue_names) - alan_index + current_cycle_position + 1
+    return cycle_day
 
 # Carregar dados
 if 'adjustments' not in st.session_state:
@@ -141,14 +148,14 @@ st.info(f"**Hoje:** {today.strftime('%d/%m/%Y')}")
 
 # Status atual
 current_person = get_person_for_date(today_weekday, adjustments, skip_rules)
-st.success(f"## 🎯 **{current_person}** é sua vez de escolher o restaurante!")
+st.success(f"## **{current_person}** é sua vez de escolher o restaurante!")
 
 # Layout principal com controles na direita
 col_main, col_controls = st.columns([0.72, 0.28])  # 72% para conteúdo principal, 28% para controles
 
 with col_main:
     # Próximos dias
-    st.markdown("### 📋 Próximos Dias")
+    st.markdown("### Próximos Dias")
 
     # Slider para dias na área principal
     days_to_show = st.slider("Dias para mostrar:", min_value=5, max_value=30, value=12, help="Quantidade de dias para mostrar")
@@ -158,11 +165,12 @@ with col_main:
 
     for i in range(days_to_show):
         person = get_person_for_date(current_date, adjustments, skip_rules)
-        cycle_day = get_cycle_info(current_date)
 
-        # Verificar se é início de novo ciclo
+        # Calcular se é início de novo ciclo (quando volta ao Pavel)
+        weekdays_since_start = count_weekdays_between(start_date.date(), current_date) - 1
+        person_index = (alan_index + weekdays_since_start) % len(queue_names)
         new_cycle_marker = ""
-        if cycle_day == 1 and i > 0:
+        if person == "Pavel" and i > 0:
             new_cycle_marker = " 🔄"
 
         # Verificar se há ajustes para esta data  
@@ -174,7 +182,7 @@ with col_main:
             adjustments_info = " (Trocado)"
 
         # Verificar se foi pulado por regra
-        original_person_index = (pavel_index + count_weekdays_between(start_date.date(), current_date) - 1) % len(queue_names)
+        original_person_index = (alan_index + weekdays_since_start) % len(queue_names)
         original_person = queue_names[original_person_index]
         if should_skip_by_rule(original_person, current_date, skip_rules) and person != original_person:
             adjustments_info = " (Regra)"
@@ -209,7 +217,7 @@ with col_main:
         hide_index=True
     )
 
-    st.caption("🔄 = Novo ciclo | (Regra) = Pulado por regra | (Manual) = Pulado manualmente | (Trocado) = Troca manual")
+    st.caption("🔄 = Novo ciclo (volta ao Pavel) | (Regra) = Pulado por regra | (Manual) = Pulado manualmente | (Trocado) = Troca manual")
 
 with col_controls:
     st.markdown("### ⚙️ Controles")
@@ -244,7 +252,7 @@ with col_controls:
 
     # Configuração de regras mais compacta
     with st.expander("📋 Regras"):
-        st.markdown("**Dias que não trabalham:**")
+        st.markdown("**Pula Nesses Dias**")
 
         day_names = ["Seg", "Ter", "Qua", "Qui", "Sex"]
 
@@ -255,7 +263,7 @@ with col_controls:
                 day_names, 
                 default=current_skip_days,
                 key=f"skip_{person}",
-                help=f"Dias que {person} não trabalha"
+                help=f"Dias que {person} não almoça fora"
             )
             skip_rules[person] = [day_names.index(day) for day in selected_days]
 
@@ -266,7 +274,7 @@ with col_controls:
             st.rerun()
 
 # Tabela de previsões (largura total)
-st.markdown("### 🔮 Previsões")
+st.markdown("### Previsões")
 
 prediction_days = st.slider("Previsão para próximos dias:", min_value=15, max_value=60, value=30)
 
@@ -302,7 +310,7 @@ for person in queue_names:
         "Próxima": next_dates[0],
         "Seguinte": next_dates[1], 
         "Depois": next_dates[2],
-        "Não Trabalha": skip_info
+        "Pula Nesses Dias": skip_info
     })
 
 df_predictions = pd.DataFrame(prediction_data)
