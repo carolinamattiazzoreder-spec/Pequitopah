@@ -9,7 +9,7 @@ import os
 st.set_page_config(page_title="Pequitopah", page_icon="📅", layout="wide")
 
 # Título
-st.title("📅 Pequitopah")
+st.title("📅 Pequitopah, evitando dor de cabeça desde de 15/10/2025!")
 st.markdown("---")
 
 # Configuração da fila - Pavel é o primeiro no ciclo, mas Alan começou em 15/10
@@ -83,8 +83,11 @@ def should_skip_by_rule(person, date, skip_rules):
         return date.weekday() in skip_rules[person]
     return False
 
-def get_person_for_date(target_date, adjustments, skip_rules):
+def get_person_for_date(target_date, adjustments, skip_rules, today=None):
     """Obtém a pessoa designada para uma data específica"""
+    if today is None:
+        today = datetime.now().date()
+
     target_date = get_next_weekday(target_date) if not is_weekday(target_date) else target_date
 
     # Verificar se há troca específica para esta data
@@ -101,21 +104,22 @@ def get_person_for_date(target_date, adjustments, skip_rules):
 
         attempts = 0
         while (queue_names[person_index] == skipped_person or 
-               should_skip_by_rule(queue_names[person_index], target_date, skip_rules)) and attempts < len(queue_names):
+               (target_date >= today and should_skip_by_rule(queue_names[person_index], target_date, skip_rules))) and attempts < len(queue_names):
             person_index = (person_index + 1) % len(queue_names)
             attempts += 1
 
         return queue_names[person_index]
 
-    # Cálculo normal com regras de dias - Alan começou, fila volta para Pavel
+    # Cálculo normal - Alan começou, fila volta para Pavel
     weekdays_since_start = count_weekdays_between(start_date.date(), target_date) - 1
     person_index = (alan_index + weekdays_since_start) % len(queue_names)
 
-    # Verificar regras de dias da semana
-    attempts = 0
-    while should_skip_by_rule(queue_names[person_index], target_date, skip_rules) and attempts < len(queue_names):
-        person_index = (person_index + 1) % len(queue_names)
-        attempts += 1
+    # Verificar regras de dias da semana APENAS para datas de hoje em diante
+    if target_date >= today:
+        attempts = 0
+        while should_skip_by_rule(queue_names[person_index], target_date, skip_rules) and attempts < len(queue_names):
+            person_index = (person_index + 1) % len(queue_names)
+            attempts += 1
 
     return queue_names[person_index]
 
@@ -147,15 +151,15 @@ today_weekday = get_next_weekday(today) if not is_weekday(today) else today
 st.info(f"**Hoje:** {today.strftime('%d/%m/%Y')}")
 
 # Status atual
-current_person = get_person_for_date(today_weekday, adjustments, skip_rules)
-st.success(f"## **{current_person}** é sua vez de escolher o restaurante!")
+current_person = get_person_for_date(today_weekday, adjustments, skip_rules, today)
+st.success(f"## **{current_person}** está na vez hoje!")
 
 # Layout principal com controles na direita
 col_main, col_controls = st.columns([0.72, 0.28])  # 72% para conteúdo principal, 28% para controles
 
 with col_main:
     # Próximos dias
-    st.markdown("### Próximos Dias")
+    st.markdown("### 📋 Próximos Dias")
 
     # Slider para dias na área principal
     days_to_show = st.slider("Dias para mostrar:", min_value=5, max_value=30, value=12, help="Quantidade de dias para mostrar")
@@ -164,7 +168,7 @@ with col_main:
     current_date = today_weekday
 
     for i in range(days_to_show):
-        person = get_person_for_date(current_date, adjustments, skip_rules)
+        person = get_person_for_date(current_date, adjustments, skip_rules, today)
 
         # Calcular se é início de novo ciclo (quando volta ao Pavel)
         weekdays_since_start = count_weekdays_between(start_date.date(), current_date) - 1
@@ -181,11 +185,12 @@ with col_main:
         elif date_str in adjustments.get("switches", {}):
             adjustments_info = " (Trocado)"
 
-        # Verificar se foi pulado por regra
-        original_person_index = (alan_index + weekdays_since_start) % len(queue_names)
-        original_person = queue_names[original_person_index]
-        if should_skip_by_rule(original_person, current_date, skip_rules) and person != original_person:
-            adjustments_info = " (Regra)"
+        # Verificar se foi pulado por regra (apenas para datas de hoje em diante)
+        if current_date >= today:
+            original_person_index = (alan_index + weekdays_since_start) % len(queue_names)
+            original_person = queue_names[original_person_index]
+            if should_skip_by_rule(original_person, current_date, skip_rules) and person != original_person:
+                adjustments_info = " (Regra)"
 
         queue_data.append({
             "Data": current_date.strftime("%d/%m"),
@@ -230,7 +235,7 @@ with col_controls:
         st.rerun()
 
     next_weekday = get_next_weekday(today_weekday + timedelta(days=1))
-    next_person = get_person_for_date(next_weekday, adjustments, skip_rules)
+    next_person = get_person_for_date(next_weekday, adjustments, skip_rules, today)
 
     if st.button(f"🔄 Trocar\n{current_person[:8]}... ↔ {next_person[:8]}...", type="secondary", use_container_width=True):
         today_str = today_weekday.strftime("%Y-%m-%d")
@@ -285,7 +290,7 @@ for person in queue_names:
 
     # Encontrar próximas 3 datas da pessoa
     for _ in range(prediction_days):
-        if get_person_for_date(search_date, adjustments, skip_rules) == person:
+        if get_person_for_date(search_date, adjustments, skip_rules, today) == person:
             days_until = count_weekdays_between(today_weekday, search_date) - 1
             if person == current_person and search_date == today_weekday:
                 next_dates.append("Hoje")
