@@ -1,436 +1,388 @@
-
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import json
 import os
+from typing import List, Dict, Any
 
-# Configuração da página
+# ---------------------------------------------------------------------
+# Page config
+# ---------------------------------------------------------------------
 st.set_page_config(page_title="Pequitopah", page_icon="🍽️", layout="wide")
 
-# Título
-st.title("📅 Pequitopah, evitando dor de cabeça desde de 15/10/2025!")
-st.markdown("---")
+# ---------------------------------------------------------------------
+# Constants and configuration
+# ---------------------------------------------------------------------
+ORIGINAL_QUEUE: List[str] = ["Pavel", "Guilherme", "Victor", "Chris", "Alan", "Thiago", "Clayton", "Carolina"]
 
-# Configuração da fila - Pavel é o primeiro no ciclo, mas Alan começou em 15/10
-queue_names = ["Pavel", "Guilherme", "Victor", "Chris", "Alan", "Thiago", "Clayton", "Carolina"]
-start_date = datetime(2025, 10, 15).date()  # Converter para date object
-alan_index = queue_names.index("Alan")  # Alan está no índice 4
+# Anchor: start rotation on 09/10/2025 with Pavel
+ANCHOR_DATE: date = date(2025, 10, 9)
+ANCHOR_PERSON: str = "Pavel"
 
-# Regras de dias que cada pessoa prefere não decidir
-DEFAULT_SKIP_RULES = {
-    "Pavel": [1],  # Terça-feira (0=segunda, 1=terça, etc.)
-    "Guilherme": [4],  # Sexta-feira
-    "Victor": [4],  # Sexta-feira  
-    "Carolina": [4],  # Sexta-feira
-    "Chris": [],
-    "Alan": [],
-    "Thiago": [],
-    "Clayton": []
-}
+# Files for persistence
+CURRENT_QUEUE_FILE = "current_queue.json"
+DAILY_ASSIGNMENTS_FILE = "daily_assignments.json"
+PREFERENCES_FILE = "preferences.json"
+ROTATION_STATE_FILE = "rotation_state.json"  # stores {anchor_date, anchor_person, offset}
 
-# Arquivos para salvar dados
-ADJUSTMENTS_FILE = "decision_adjustments.json"
-RULES_FILE = "decision_rules.json"
-SWAPS_FILE = "decision_swaps.json"
+# Day labels (Portuguese, weekdays only)
+DAY_NAMES_PT = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta"]
+DAY_NAMES_PT_SHORT = ["Seg", "Ter", "Qua", "Qui", "Sex"]
 
-def load_adjustments():
-    """Carrega ajustes salvos (pessoas que passaram a vez ou trocaram)"""
-    if os.path.exists(ADJUSTMENTS_FILE):
-        with open(ADJUSTMENTS_FILE, 'r') as f:
-            return json.load(f)
-    return {"skipped": {}, "switches": {}}
+# ---------------------------------------------------------------------
+# Safe JSON helpers
+# ---------------------------------------------------------------------
+def safe_load_json(path: str, default: Any) -> Any:
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return default
 
-def save_adjustments(adjustments):
-    """Salva ajustes no arquivo"""
-    with open(ADJUSTMENTS_FILE, 'w') as f:
-        json.dump(adjustments, f)
+def safe_save_json(path: str, data: Any) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
 
-def load_skip_rules():
-    """Carrega regras de dias que pessoas preferem não decidir"""
-    if os.path.exists(RULES_FILE):
-        with open(RULES_FILE, 'r') as f:
-            return json.load(f)
-    return DEFAULT_SKIP_RULES.copy()
+# ---------------------------------------------------------------------
+# Persistence: queue, assignments, preferences, rotation state
+# ---------------------------------------------------------------------
+def load_current_queue() -> List[str]:
+    data = safe_load_json(CURRENT_QUEUE_FILE, None)
+    if isinstance(data, list) and data and all(isinstance(x, str) for x in data):
+        return data
+    return ORIGINAL_QUEUE.copy()
 
-def save_skip_rules(rules):
-    """Salva regras de dias"""
-    with open(RULES_FILE, 'w') as f:
-        json.dump(rules, f)
+def save_current_queue(queue: List[str]) -> None:
+    safe_save_json(CURRENT_QUEUE_FILE, queue)
 
-def load_rule_swaps():
-    """Carrega trocas geradas por regras"""
-    if os.path.exists(SWAPS_FILE):
-        with open(SWAPS_FILE, 'r') as f:
-            return json.load(f)
+def load_daily_assignments() -> Dict[str, str]:
+    data = safe_load_json(DAILY_ASSIGNMENTS_FILE, {})
+    if isinstance(data, dict):
+        return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
     return {}
 
-def save_rule_swaps(swaps):
-    """Salva trocas geradas por regras"""
-    with open(SWAPS_FILE, 'w') as f:
-        json.dump(swaps, f)
+def save_daily_assignments(data: Dict[str, str]) -> None:
+    safe_save_json(DAILY_ASSIGNMENTS_FILE, data)
 
-def is_weekday(date):
-    """Verifica se a data é um dia útil (segunda a sexta)"""
-    return date.weekday() < 5
+def load_preferences() -> Dict[str, List[int]]:
+    default = {
+        "Pavel": [], "Guilherme": [], "Victor": [], "Chris": [],
+        "Alan": [], "Thiago": [], "Clayton": [], "Carolina": []
+    }
+    data = safe_load_json(PREFERENCES_FILE, default)
+    clean: Dict[str, List[int]] = {}
+    for p in ORIGINAL_QUEUE:
+        vals = data.get(p, [])
+        if isinstance(vals, list):
+            clean[p] = [x for x in vals if isinstance(x, int) and 0 <= x <= 4]
+        else:
+            clean[p] = []
+    return clean
 
-def get_next_weekday(date):
-    """Obtém o próximo dia útil"""
-    while not is_weekday(date):
-        date += timedelta(days=1)
-    return date
+def save_preferences(prefs: Dict[str, List[int]]) -> None:
+    safe_save_json(PREFERENCES_FILE, prefs)
 
-def count_weekdays_between(start_date, end_date):
-    """Conta quantos dias úteis existem entre duas datas"""
-    count = 0
-    current_date = start_date
-    while current_date <= end_date:
-        if is_weekday(current_date):
-            count += 1
-        current_date += timedelta(days=1)
-    return count
+def load_rotation_state(current_queue: List[str]) -> int:
+    """
+    rotation_offset aligns positions so that index 'rotation_offset' in the current_queue
+    is the person assigned on ANCHOR_DATE, and persists with anchor metadata.
+    """
+    want_anchor_date = ANCHOR_DATE.strftime("%Y-%m-%d")
+    state = safe_load_json(ROTATION_STATE_FILE, None)
+    if isinstance(state, dict) and "offset" in state:
+        if state.get("anchor_date") == want_anchor_date and state.get("anchor_person") == ANCHOR_PERSON:
+            try:
+                return int(state["offset"])
+            except Exception:
+                pass
+    # Initialize offset so ANCHOR_PERSON is assigned on ANCHOR_DATE
+    try:
+        idx = current_queue.index(ANCHOR_PERSON)
+    except ValueError:
+        idx = 0
+    save_rotation_state(idx)
+    return idx
 
-def should_skip_by_rule(person, date, skip_rules):
-    """Verifica se a pessoa prefere não decidir neste dia da semana"""
-    if person in skip_rules:
-        return date.weekday() in skip_rules[person]
-    return False
+def save_rotation_state(offset: int) -> None:
+    state = {
+        "anchor_date": ANCHOR_DATE.strftime("%Y-%m-%d"),
+        "anchor_person": ANCHOR_PERSON,
+        "offset": int(offset)
+    }
+    safe_save_json(ROTATION_STATE_FILE, state)
 
-def generate_rule_swaps(skip_rules, start_date, end_date):
-    """Gera todas as trocas necessárias baseadas nas regras para um período"""
-    swaps = {}
-    current_date = start_date
+# ---------------------------------------------------------------------
+# Date utilities
+# ---------------------------------------------------------------------
+def is_weekday(d: date) -> bool:
+    return d.weekday() < 5
 
-    while current_date <= end_date:
-        if is_weekday(current_date):
-            # Calcular pessoa original para esta data
-            weekdays_since_start = count_weekdays_between(start_date, current_date) - 1
-            person_index = (alan_index + weekdays_since_start) % len(queue_names)
-            original_person = queue_names[person_index]
+def get_next_weekday(d: date) -> date:
+    while not is_weekday(d):
+        d += timedelta(days=1)
+    return d
 
-            # Verificar se pessoa original tem regra para este dia
-            if should_skip_by_rule(original_person, current_date, skip_rules):
-                # Encontrar próxima pessoa na fila
-                next_person_index = (person_index + 1) % len(queue_names)
-                next_person = queue_names[next_person_index]
+def count_weekdays_between(start_d: date, end_d: date) -> int:
+    """
+    Inclusive count of weekdays between two dates.
+    """
+    if end_d < start_d:
+        return 0
+    cnt = 0
+    cur = start_d
+    while cur <= end_d:
+        if is_weekday(cur):
+            cnt += 1
+        cur += timedelta(days=1)
+    return cnt
 
-                # Encontrar quando seria o dia da próxima pessoa
-                search_date = current_date + timedelta(days=1)
-                for _ in range(14):  # Buscar nos próximos 14 dias
-                    if is_weekday(search_date):
-                        search_weekdays = count_weekdays_between(start_date, search_date) - 1
-                        search_person_index = (alan_index + search_weekdays) % len(queue_names)
-                        if queue_names[search_person_index] == next_person:
-                            # Fazer a troca
-                            date_str = current_date.strftime("%Y-%m-%d")
-                            search_date_str = search_date.strftime("%Y-%m-%d")
+# ---------------------------------------------------------------------
+# Rotation math
+# ---------------------------------------------------------------------
+def weekdays_since_anchor(d: date) -> int:
+    d = get_next_weekday(d)
+    return max(0, count_weekdays_between(ANCHOR_DATE, d) - 1)  # 0 at anchor
 
-                            swaps[date_str] = next_person
-                            swaps[search_date_str] = original_person
-                            break
-                    search_date += timedelta(days=1)
+def position_for_date(d: date, queue: List[str], rotation_offset: int) -> int:
+    w = weekdays_since_anchor(d)
+    return (rotation_offset + w) % len(queue)
 
-        current_date += timedelta(days=1)
+def cycle_index_for_date(d: date, queue_len: int, rotation_offset: int) -> int:
+    w = weekdays_since_anchor(d)
+    return (rotation_offset + w) // queue_len
 
-    return swaps
+# ---------------------------------------------------------------------
+# Selection logic (manual override -> preferences)
+# ---------------------------------------------------------------------
+def select_person_for_date(
+    target_date: date,
+    current_queue: List[str],
+    daily_assignments: Dict[str, str],
+    preferences: Dict[str, List[int]],
+    rotation_offset: int
+) -> str:
+    td = get_next_weekday(target_date)
+    date_str = td.strftime("%Y-%m-%d")
 
-def get_person_for_date(target_date, adjustments, skip_rules, rule_swaps, today=None):
-    """Obtém a pessoa que decide onde almoçar em uma data específica"""
-    if today is None:
-        today = datetime.now().date()
+    # Manual override wins
+    if date_str in daily_assignments:
+        return daily_assignments[date_str]
 
-    target_date = get_next_weekday(target_date) if not is_weekday(target_date) else target_date
-    date_str = target_date.strftime("%Y-%m-%d")
+    n = len(current_queue)
+    base = position_for_date(td, current_queue, rotation_offset)
 
-    # Verificar se há troca manual específica para esta data
-    if date_str in adjustments.get("switches", {}):
-        return adjustments["switches"][date_str]
+    # First pass: respect preferences
+    for i in range(n):
+        cand = current_queue[(base + i) % n]
+        if td.weekday() in preferences.get(cand, []):
+            continue
+        return cand
 
-    # Verificar se há troca por regra para esta data (apenas datas futuras)
-    if target_date >= today and date_str in rule_swaps:
-        return rule_swaps[date_str]
+    # Second pass: ignore preferences to ensure assignment
+    return current_queue[base]
 
-    # Verificar se a pessoa passou a vez nesta data
-    if date_str in adjustments.get("skipped", {}):
-        skipped_person = adjustments["skipped"][date_str]
-        weekdays_since_start = count_weekdays_between(start_date, target_date) - 1
-        person_index = (alan_index + weekdays_since_start) % len(queue_names)
+# ---------------------------------------------------------------------
+# Permanent queue modification
+# ---------------------------------------------------------------------
+def switch_persons(current_queue: List[str], person1: str, person2: str) -> List[str]:
+    new_queue = current_queue.copy()
+    if person1 in new_queue and person2 in new_queue:
+        i1, i2 = new_queue.index(person1), new_queue.index(person2)
+        new_queue[i1], new_queue[i2] = new_queue[i2], new_queue[i1]
+    return new_queue
 
-        attempts = 0
-        while queue_names[person_index] == skipped_person and attempts < len(queue_names):
-            person_index = (person_index + 1) % len(queue_names)
-            attempts += 1
+# ---------------------------------------------------------------------
+# Streamlit App
+# ---------------------------------------------------------------------
+st.title("📅 Pequitopah - Sistema de Almoço")
+st.markdown("---")
 
-        return queue_names[person_index]
+# Session state boot
+if "current_queue" not in st.session_state:
+    st.session_state.current_queue = load_current_queue()
+if "daily_assignments" not in st.session_state:
+    st.session_state.daily_assignments = load_daily_assignments()
+if "preferences" not in st.session_state:
+    st.session_state.preferences = load_preferences()
+if "rotation_offset" not in st.session_state:
+    st.session_state.rotation_offset = load_rotation_state(st.session_state.current_queue)
 
-    # Cálculo normal - Alan começou, fila volta para Pavel
-    weekdays_since_start = count_weekdays_between(start_date, target_date) - 1
-    person_index = (alan_index + weekdays_since_start) % len(queue_names)
+current_queue = st.session_state.current_queue
+daily_assignments = st.session_state.daily_assignments
+preferences = st.session_state.preferences
+rotation_offset = st.session_state.rotation_offset
 
-    return queue_names[person_index]
-
-def get_cycle_info(target_date):
-    """Obtém informações sobre o ciclo para uma data"""
-    weekdays_since_start = count_weekdays_between(start_date, target_date) - 1
-    current_cycle_position = (alan_index + weekdays_since_start) % len(queue_names)
-    if current_cycle_position >= alan_index:
-        cycle_day = current_cycle_position - alan_index + 1
-    else:
-        cycle_day = len(queue_names) - alan_index + current_cycle_position + 1
-    return cycle_day
-
-# Carregar dados
-if 'adjustments' not in st.session_state:
-    st.session_state.adjustments = load_adjustments()
-if 'skip_rules' not in st.session_state:
-    st.session_state.skip_rules = load_skip_rules()
-if 'rule_swaps' not in st.session_state:
-    st.session_state.rule_swaps = load_rule_swaps()
-
-adjustments = st.session_state.adjustments
-skip_rules = st.session_state.skip_rules
-rule_swaps = st.session_state.rule_swaps
-
-# Data atual
+# Today and current person
 today = datetime.now().date()
-today_weekday = get_next_weekday(today) if not is_weekday(today) else today
+today_wd = get_next_weekday(today)
+st.info(f"Hoje: {today.strftime('%d/%m/%Y')}")
 
-st.info(f"**Hoje:** {today.strftime('%d/%m/%Y')}")
-
-# Status atual
-current_person = get_person_for_date(today_weekday, adjustments, skip_rules, rule_swaps, today)
-st.success(f"## **{current_person}**, você decide onde vamos almoçar hoje!")
-
-# Layout principal com controles na direita
-col_main, col_controls = st.columns([0.72, 0.28])
+current_person = select_person_for_date(today_wd, current_queue, daily_assignments, preferences, rotation_offset)
+st.success(f"## {current_person} decide onde vamos almoçar hoje!")
+# Layout
+col_main, col_controls = st.columns([0.7, 0.3])
 
 with col_main:
-    # Próximos dias
-    st.markdown("### Próximas Dias")
+    st.markdown("### Próximos Dias")
+    days_to_show = st.slider("Dias para mostrar:", min_value=5, max_value=20, value=12)
 
-    days_to_show = st.slider("Dias para mostrar:", min_value=5, max_value=30, value=12, help="Quantidade de dias para mostrar")
-
-    queue_data = []
-    current_date = today_weekday
-
+    rows = []
+    cur_date = today_wd
+    prev_cycle = None
     for i in range(days_to_show):
-        person = get_person_for_date(current_date, adjustments, skip_rules, rule_swaps, today)
+        cyc = cycle_index_for_date(cur_date, len(current_queue), rotation_offset)
+        person = select_person_for_date(cur_date, current_queue, daily_assignments, preferences, rotation_offset)
 
-        # Calcular se é início de novo ciclo (quando volta ao Pavel)
-        new_cycle_marker = ""
-        if person == "Pavel" and i > 0:
-            new_cycle_marker = " 🔄"
+        cycle_marker = ""
+        if prev_cycle is not None and cyc != prev_cycle:
+            cycle_marker = " 🔄"
+        prev_cycle = cyc
 
-        # Verificar se há ajustes para esta data  
-        date_str = current_date.strftime("%Y-%m-%d")
-        adjustments_info = ""
-        if date_str in adjustments.get("skipped", {}):
-            adjustments_info = " (Passou)"
-        elif date_str in adjustments.get("switches", {}):
-            adjustments_info = " (Trocado)"
-        elif current_date >= today and date_str in rule_swaps:
-            adjustments_info = " (Preferência)"
-
-        queue_data.append({
-            "Data": current_date.strftime("%d/%m"),
-            "Dia": current_date.strftime("%A"),
-            "Pessoa": person + new_cycle_marker + adjustments_info
+        rows.append({
+            "Data": cur_date.strftime("%d/%m"),
+            "Dia": DAY_NAMES_PT[cur_date.weekday()],
+            "Pessoa": person + cycle_marker
         })
+        cur_date = get_next_weekday(cur_date + timedelta(days=1))
 
-        current_date = get_next_weekday(current_date + timedelta(days=1))
+    df_queue = pd.DataFrame(rows)
 
-    df_queue = pd.DataFrame(queue_data)
+    def highlight_today(s: pd.Series):
+        return ['background-color: #90EE90; font-weight: bold'] * len(s) if s.name == 0 else [''] * len(s)
 
-    # Traduzir nomes dos dias
-    day_translation = {
-        "Monday": "Segunda", "Tuesday": "Terça", "Wednesday": "Quarta",
-        "Thursday": "Quinta", "Friday": "Sexta"
-    }
-
-    df_queue["Dia"] = df_queue["Dia"].map(day_translation)
-
-    def highlight_today_row(s):
-        if s.name == 0:
-            return ['background-color: #90EE90; font-weight: bold'] * len(s)
-        else:
-            return [''] * len(s)
-
-    st.dataframe(
-        df_queue.style.apply(highlight_today_row, axis=1), 
-        use_container_width=True,
-        hide_index=True
-    )
-
-    st.caption("🔄 = Novo ciclo (volta ao Pavel) | (Preferência) = Trocado por preferência | (Passou) = Passou a vez | (Trocado) = Troca manual")
-    st.caption("⚠️ **Preferências:** Se pessoa não quer decidir, troca com a próxima da fila")
+    st.dataframe(df_queue.style.apply(highlight_today, axis=1), use_container_width=True, hide_index=True)
+    st.caption("🔄 = Novo ciclo | Passar vez remove somente este loop (ajusta a rotação) | Trocar posição altera a fila permanentemente")
 
 with col_controls:
     st.markdown("### ⚙️ Controles")
 
-    # Botões empilhados verticalmente
-    if st.button("➡️ Passar vez\nhoje", type="secondary", use_container_width=True):
-        date_str = today_weekday.strftime("%Y-%m-%d")
-        st.session_state.adjustments["skipped"][date_str] = current_person
-        save_adjustments(st.session_state.adjustments)
+    # Pass Turn: remove only for this loop by shifting rotation phase +1 from today onward
+    if st.button(f"⏭️ Passar vez hoje (pular {current_person} neste loop)", type="primary", use_container_width=True):
+        n = len(current_queue)
+        if n > 1:
+            st.session_state.rotation_offset = (rotation_offset + 1) % n
+            save_rotation_state(st.session_state.rotation_offset)
+            # Clear manual override for today since the assignment is recalculated
+            ds = today_wd.strftime("%Y-%m-%d")
+            if ds in st.session_state.daily_assignments:
+                st.session_state.daily_assignments.pop(ds, None)
+                save_daily_assignments(st.session_state.daily_assignments)
         st.rerun()
 
-    next_weekday = get_next_weekday(today_weekday + timedelta(days=1))
-    next_person = get_person_for_date(next_weekday, adjustments, skip_rules, rule_swaps, today)
-
-    if st.button(f"🔄 Trocar\n{current_person[:8]}... ↔ {next_person[:8]}...", type="secondary", use_container_width=True):
-        today_str = today_weekday.strftime("%Y-%m-%d")
-        next_str = next_weekday.strftime("%Y-%m-%d")
-
-        st.session_state.adjustments["switches"][today_str] = next_person
-        st.session_state.adjustments["switches"][next_str] = current_person
-        save_adjustments(st.session_state.adjustments)
-        st.rerun()
-
-    if st.button("🗑️ Limpar\najustes", use_container_width=True):
-        st.session_state.adjustments = {"skipped": {}, "switches": {}}
-        st.session_state.rule_swaps = {}
-        save_adjustments(st.session_state.adjustments)
-        save_rule_swaps({})
-        if os.path.exists(ADJUSTMENTS_FILE):
-            os.remove(ADJUSTMENTS_FILE)
-        if os.path.exists(SWAPS_FILE):
-            os.remove(SWAPS_FILE)
+    # Switch: swap today with "tomorrow" permanently
+    tomorrow_date = get_next_weekday(today_wd + timedelta(days=1))
+    tomorrow_person = select_person_for_date(tomorrow_date, current_queue, daily_assignments, preferences, rotation_offset)
+    if st.button(f"🔄 Trocar posição ({current_person} ↔ {tomorrow_person})", type="secondary", use_container_width=True):
+        st.session_state.current_queue = switch_persons(current_queue, current_person, tomorrow_person)
+        save_current_queue(st.session_state.current_queue)
         st.rerun()
 
     st.markdown("---")
 
-    # Configuração de preferências
-    with st.expander("⚙️ Preferências"):
-        st.markdown("**Dias que preferem não decidir:**")
-        st.caption("⚠️ Gera trocas automáticas com próxima pessoa")
+    # Temporary manual override for today
+    st.markdown("Escolha manual para hoje (temporário):")
+    try:
+        current_person_index = current_queue.index(current_person)
+    except ValueError:
+        current_person_index = 0
+    selected_person = st.selectbox("Pessoa:", current_queue, index=current_person_index, key="manual_select")
 
-        day_names = ["Seg", "Ter", "Qua", "Qui", "Sex"]
-
-        for person in queue_names:
-            current_skip_days = [day_names[day] for day in skip_rules.get(person, [])]
-            selected_days = st.multiselect(
-                f"{person[:6]}:", 
-                day_names, 
-                default=current_skip_days,
-                key=f"skip_{person}",
-                help=f"Dias que {person} prefere não ter que decidir - troca automaticamente com próxima pessoa"
-            )
-            skip_rules[person] = [day_names.index(day) for day in selected_days]
-
-        if st.button("💾 Salvar Preferências", use_container_width=True):
-            st.session_state.skip_rules = skip_rules
-            save_skip_rules(skip_rules)
-
-            # Gerar trocas para próximos 60 dias
-            end_date = today + timedelta(days=60)
-            new_swaps = generate_rule_swaps(skip_rules, today, end_date)
-            st.session_state.rule_swaps = new_swaps
-            save_rule_swaps(new_swaps)
-
-            st.success("✅ Preferências salvas e trocas geradas!")
+    if st.button("✅ Confirmar", use_container_width=True):
+        if selected_person != current_person:
+            st.session_state.daily_assignments[today_wd.strftime("%Y-%m-%d")] = selected_person
+            save_daily_assignments(st.session_state.daily_assignments)
             st.rerun()
 
-# Tabela de previsões
-st.markdown("### 🔮 Próximas Vezes de Decidir")
+    st.markdown("---")
 
-prediction_days = st.slider("Previsão para próximos dias:", min_value=15, max_value=60, value=30)
+    # Reset buttons
+    if st.button("🔄 Resetar fila original", use_container_width=True):
+        st.session_state.current_queue = ORIGINAL_QUEUE.copy()
+        save_current_queue(st.session_state.current_queue)
+        # Recompute rotation offset so ANCHOR_PERSON is assigned on ANCHOR_DATE
+        try:
+            idx = st.session_state.current_queue.index(ANCHOR_PERSON)
+        except ValueError:
+            idx = 0
+        st.session_state.rotation_offset = idx
+        save_rotation_state(idx)
+        st.rerun()
 
-prediction_data = []
-for person in queue_names:
-    next_dates = []
-    search_date = today_weekday
+    if st.button("🗑️ Limpar tudo", use_container_width=True):
+        # Reset in-memory
+        st.session_state.current_queue = ORIGINAL_QUEUE.copy()
+        st.session_state.daily_assignments = {}
+        st.session_state.preferences = load_preferences()
+        # Remove files
+        for f in [CURRENT_QUEUE_FILE, DAILY_ASSIGNMENTS_FILE, PREFERENCES_FILE, ROTATION_STATE_FILE]:
+            if os.path.exists(f):
+                os.remove(f)
+        st.rerun()
 
-    for _ in range(prediction_days):
-        if get_person_for_date(search_date, adjustments, skip_rules, rule_swaps, today) == person:
-            days_until = count_weekdays_between(today_weekday, search_date) - 1
-            if person == current_person and search_date == today_weekday:
+# Preferences expander
+with st.expander("⚙️ Preferências"):
+    st.markdown("Dias que preferem NÃO decidir (cria troca temporária):")
+
+    for person in ORIGINAL_QUEUE:
+        current_days = [DAY_NAMES_PT_SHORT[d] for d in preferences.get(person, [])]
+        selected_days = st.multiselect(f"{person}:", DAY_NAMES_PT_SHORT, default=current_days, key=f"pref_{person}")
+        preferences[person] = [DAY_NAMES_PT_SHORT.index(d) for d in selected_days]
+
+    if st.button("💾 Salvar Preferências", use_container_width=True):
+        st.session_state.preferences = preferences
+        save_preferences(preferences)
+        st.success("✅ Preferências salvas!")
+        st.rerun()
+
+# Predictions table
+st.markdown("### 🔮 Próximas Vezes")
+prediction_rows = []
+for person in current_queue:
+    next_dates: List[str] = []
+    search_date = today_wd
+    for _ in range(60):
+        assigned = select_person_for_date(search_date, current_queue, daily_assignments, preferences, rotation_offset)
+        if assigned == person:
+            if person == current_person and search_date == today_wd:
                 next_dates.append("Hoje")
             else:
-                next_dates.append(f"{search_date.strftime('%d/%m')} (em {days_until} dias)")
-
+                days_until = count_weekdays_between(today_wd, search_date)
+                next_dates.append(f"{search_date.strftime('%d/%m')} (em {max(0, days_until-1)} dias)")
             if len(next_dates) >= 3:
                 break
-
         search_date = get_next_weekday(search_date + timedelta(days=1))
 
     while len(next_dates) < 3:
         next_dates.append("N/A")
 
-    skip_days = [["Segunda", "Terça", "Quarta", "Quinta", "Sexta"][day] for day in skip_rules.get(person, [])]
-    skip_info = ", ".join(skip_days) if skip_days else "Nenhum"
-
-    prediction_data.append({
+    skip_days_list = [DAY_NAMES_PT_SHORT[d] for d in preferences.get(person, [])]
+    skip_info = ", ".join(skip_days_list) if skip_days_list else "Nenhum"
+    prediction_rows.append({
         "Pessoa": person,
         "Próxima": next_dates[0],
-        "Seguinte": next_dates[1], 
+        "Seguinte": next_dates[1],
         "Depois": next_dates[2],
-        "Evita Decidir": skip_info
+        "Evita": skip_info
     })
 
-df_predictions = pd.DataFrame(prediction_data)
+df_predictions = pd.DataFrame(prediction_rows)
 
-def highlight_current_person(s):
-    if s["Pessoa"] == current_person:
-        return ['background-color: #E8F4FD; font-weight: bold'] * len(s)
-    else:
-        return [''] * len(s)
+def highlight_current(s: pd.Series):
+    return ['background-color: #E8F4FD; font-weight: bold'] * len(s) if s["Pessoa"] == current_person else [''] * len(s)
 
-st.dataframe(
-    df_predictions.style.apply(highlight_current_person, axis=1),
-    use_container_width=True,
-    hide_index=True
-)
+st.dataframe(df_predictions.style.apply(highlight_current, axis=1), use_container_width=True, hide_index=True)
 
-# Mostrar trocas ativas por preferências
-if rule_swaps:
+# Temporary assignments display
+if daily_assignments:
     st.markdown("---")
-    st.markdown("### 🔄 Trocas por Preferências")
-
-    swaps_info = []
-    processed_dates = set()
-
-    for date_str, person in rule_swaps.items():
-        if date_str not in processed_dates:
-            date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
-            if date_obj >= today:
-                # Encontrar a pessoa original
-                weekdays_since_start = count_weekdays_between(start_date, date_obj) - 1
-                original_index = (alan_index + weekdays_since_start) % len(queue_names)
-                original_person = queue_names[original_index]
-
-                swaps_info.append({
-                    "Data": date_obj.strftime("%d/%m"),
-                    "Dia": day_translation.get(date_obj.strftime("%A"), date_obj.strftime("%A")),
-                    "Original": original_person,
-                    "Decide": person
-                })
-                processed_dates.add(date_str)
-
-    if swaps_info:
-        df_swaps = pd.DataFrame(swaps_info)
-        st.dataframe(df_swaps, use_container_width=True, hide_index=True)
-        st.caption("Trocas automáticas geradas pelas preferências de dias")
-
-# Mostrar ajustes manuais ativos se houver
-if adjustments["skipped"] or adjustments["switches"]:
-    st.markdown("---")
-    st.markdown("### 📝 Alterações Manuais")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        if adjustments["skipped"]:
-            st.markdown("**Pessoas que Passaram a Vez:**")
-            for date_str, person in adjustments["skipped"].items():
-                date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
-                st.write(f"• {date_obj.strftime('%d/%m')}: {person}")
-
-    with col2:
-        if adjustments["switches"]:
-            st.markdown("**Trocas Manuais:**")
-            processed_switches = set()
-            for date_str, person in adjustments["switches"].items():
-                if date_str not in processed_switches:
-                    date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
-                    st.write(f"• {date_obj.strftime('%d/%m')}: {person}")
-                    processed_switches.add(date_str)
+    st.markdown("### 📝 Escolhas Manuais (Temporárias)")
+    for date_str, p in sorted(daily_assignments.items()):
+        date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
+        # Compute original without overrides
+        original = select_person_for_date(date_obj, current_queue, {}, preferences, rotation_offset)
+        if p != original:
+            st.write(f"• {date_obj.strftime('%d/%m')}: {p} (no lugar de {original})")
