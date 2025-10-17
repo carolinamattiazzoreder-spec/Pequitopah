@@ -3,12 +3,64 @@ import pandas as pd
 from datetime import datetime, timedelta, date
 import json
 import os
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple, Optional
 
 # ---------------------------------------------------------------------
 # Page config
 # ---------------------------------------------------------------------
 st.set_page_config(page_title="Pequitopah", page_icon="🍽️", layout="wide")
+
+# ---------------------------------------------------------------------
+# Global style (sleeker, compact, better tab spacing)
+# ---------------------------------------------------------------------
+st.markdown(
+    """
+    <style>
+      /* Compact buttons */
+      div.stButton > button {
+        padding: 0.35rem 0.6rem;
+        font-size: 0.92rem;
+        border-radius: 10px;
+      }
+      /* Dense select/multiselect */
+      div[data-baseweb="select"] > div {
+        min-height: 38px;
+      }
+      /* Tabs: increase spacing */
+      div[data-baseweb="tab-list"],
+      div[role="tablist"] {
+        gap: 0.6rem !important;
+      }
+      button[role="tab"] {
+        padding: 0.4rem 0.8rem;
+        border-radius: 10px;
+      }
+      /* Compact captions and headers */
+      .small-caption { font-size: .85rem; color: #6b7280; }
+      .section-subtle { font-size: .95rem; margin-top: .25rem; color: #6b7280; }
+      /* Card-like containers */
+      .card {
+        background: rgba(0,0,0,0.03);
+        border: 1px solid rgba(0,0,0,0.08);
+        border-radius: 12px;
+        padding: .6rem .8rem;
+      }
+      .card-tight {
+        background: rgba(0,0,0,0.02);
+        border: 1px solid rgba(0,0,0,0.06);
+        border-radius: 10px;
+        padding: .5rem .6rem;
+      }
+      /* Dataframe readability */
+      .stDataFrame { font-size: 0.95rem; }
+      /* Sliders smaller label spacing */
+      div.stSlider > div { padding-top: 0.2rem; }
+      /* Space below top-level tabs */
+      .stTabs { margin-bottom: 0.6rem; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 # ---------------------------------------------------------------------
 # Constants and configuration
@@ -69,19 +121,15 @@ def save_daily_assignments(data: Dict[str, str]) -> None:
     safe_save_json(DAILY_ASSIGNMENTS_FILE, data)
 
 def load_preferences() -> Dict[str, List[int]]:
-    default = {
-        "Pavel": [], "Guilherme": [], "Victor": [], "Chris": [],
-        "Alan": [], "Thiago": [], "Clayton": [], "Carolina": []
-    }
-    data = safe_load_json(PREFERENCES_FILE, default)
-    clean: Dict[str, List[int]] = {}
-    for p in ORIGINAL_QUEUE:
-        vals = data.get(p, [])
-        if isinstance(vals, list):
-            clean[p] = [x for x in vals if isinstance(x, int) and 0 <= x <= 4]
-        else:
-            clean[p] = []
-    return clean
+    # Dynamic: accept any names, sanitize values 0..4 (weekdays)
+    data = safe_load_json(PREFERENCES_FILE, {})
+    if not isinstance(data, dict):
+        return {}
+    cleaned: Dict[str, List[int]] = {}
+    for k, v in data.items():
+        if isinstance(k, str) and isinstance(v, list):
+            cleaned[k] = [x for x in v if isinstance(x, int) and 0 <= x <= 4]
+    return cleaned
 
 def save_preferences(prefs: Dict[str, List[int]]) -> None:
     safe_save_json(PREFERENCES_FILE, prefs)
@@ -156,7 +204,7 @@ def cycle_index_for_date(d: date, queue_len: int, rotation_offset: int) -> int:
     return (rotation_offset + w) // queue_len
 
 # ---------------------------------------------------------------------
-# Selection logic (manual override -> preferences)
+# Selection (single-day, used for some controls)
 # ---------------------------------------------------------------------
 def select_person_for_date(
     target_date: date,
@@ -166,34 +214,122 @@ def select_person_for_date(
     rotation_offset: int
 ) -> str:
     td = get_next_weekday(target_date)
-    date_str = td.strftime("%Y-%m-%d")
+    ds = td.strftime("%Y-%m-%d")
 
-    # Manual override wins
-    if date_str in daily_assignments:
-        return daily_assignments[date_str]
+    if ds in daily_assignments:
+        return daily_assignments[ds]
 
     n = len(current_queue)
     base = position_for_date(td, current_queue, rotation_offset)
 
-    # First pass: respect preferences
+    # Respect preferences
     for i in range(n):
         cand = current_queue[(base + i) % n]
         if td.weekday() in preferences.get(cand, []):
             continue
         return cand
 
-    # Second pass: ignore preferences to ensure assignment
     return current_queue[base]
 
 # ---------------------------------------------------------------------
-# Permanent queue modification
+# Simulation with preference "swap" carryover
 # ---------------------------------------------------------------------
-def switch_persons(current_queue: List[str], person1: str, person2: str) -> List[str]:
-    new_queue = current_queue.copy()
-    if person1 in new_queue and person2 in new_queue:
-        i1, i2 = new_queue.index(person1), new_queue.index(person2)
-        new_queue[i1], new_queue[i2] = new_queue[i2], new_queue[i1]
-    return new_queue
+def simulate_schedule(
+    start_date: date,
+    days: int,
+    current_queue: List[str],
+    daily_assignments: Dict[str, str],
+    preferences: Dict[str, List[int]],
+    rotation_offset: int
+) -> List[Tuple[date, str]]:
+    """
+    Build a day-by-day schedule applying:
+    - manual overrides,
+    - if base person avoids the weekday, assign next eligible and carry the avoided base person to the next weekday (swap),
+    - the carryover is attempted only on the immediate next weekday; if they also avoid it, the carry is dropped.
+    """
+    out: List[Tuple[date, str]] = []
+    carry_person: Optional[str] = None
+    cur = get_next_weekday(start_date)
+    for _ in range(days):
+        ds = cur.strftime("%Y-%m-%d")
+
+        # Manual override: takes precedence and clears any carryover
+        if ds in daily_assignments:
+            out.append((cur, daily_assignments[ds]))
+            carry_person = None
+            cur = get_next_weekday(cur + timedelta(days=1))
+            continue
+
+        # If there is a carryover, try to place them today unless they avoid today
+        if carry_person is not None and cur.weekday() not in preferences.get(carry_person, []):
+            out.append((cur, carry_person))
+            carry_person = None
+            cur = get_next_weekday(cur + timedelta(days=1))
+            continue
+        else:
+            # drop carryover if cannot place today
+            carry_person = None
+
+        # Normal selection from base
+        n = len(current_queue)
+        base = position_for_date(cur, current_queue, rotation_offset)
+        base_person = current_queue[base]
+
+        # If base avoids, find next eligible and carry base to next day
+        if cur.weekday() in preferences.get(base_person, []):
+            assigned = None
+            for i in range(1, n + 1):  # search next eligible including wrap
+                cand = current_queue[(base + i) % n]
+                if cur.weekday() in preferences.get(cand, []):
+                    continue
+                assigned = cand
+                break
+            if assigned is None:
+                assigned = base_person  # fallback
+            else:
+                # set carry to place base_person tomorrow (single-day swap)
+                carry_person = base_person
+            out.append((cur, assigned))
+        else:
+            out.append((cur, base_person))
+
+        cur = get_next_weekday(cur + timedelta(days=1))
+
+    return out
+
+# ---------------------------------------------------------------------
+# Queue change helpers
+# ---------------------------------------------------------------------
+def apply_queue_change(new_queue: List[str], realign_anchor: bool = True) -> None:
+    """
+    Apply a new queue order and update rotation phase according to intent:
+    - realign_anchor=True: re-align offset so ANCHOR_PERSON is assigned on ANCHOR_DATE (use in Config/Reset).
+    - realign_anchor=False: preserve current phase/offset (use in Agenda actions like Switch to avoid undoing Skip Turn/Skip Day).
+    """
+    st.session_state.current_queue = new_queue
+    save_current_queue(new_queue)
+    if realign_anchor:
+        try:
+            idx = new_queue.index(ANCHOR_PERSON)
+        except ValueError:
+            idx = 0
+        st.session_state.rotation_offset = idx
+        save_rotation_state(idx)
+    else:
+        # Keep current rotation_offset to preserve phase after actions like Switch/Skip Day/Skip Turn
+        save_rotation_state(st.session_state.rotation_offset)
+    st.rerun()
+
+def move_person(queue: List[str], person: str, new_index: int) -> List[str]:
+    if person not in queue:
+        return queue
+    q = queue.copy()
+    old_index = q.index(person)
+    q.pop(old_index)
+    new_index = max(0, min(new_index, len(q)))  # clamp to ends
+    q.insert(new_index, person)
+    return q
 
 # ---------------------------------------------------------------------
 # Streamlit App
@@ -216,173 +352,335 @@ daily_assignments = st.session_state.daily_assignments
 preferences = st.session_state.preferences
 rotation_offset = st.session_state.rotation_offset
 
-# Today and current person
-today = datetime.now().date()
-today_wd = get_next_weekday(today)
-st.info(f"Hoje: {today.strftime('%d/%m/%Y')}")
+# Tabs (Agenda, Configurações with sub-tabs; widen spacing via CSS above)
+tab_agenda, tab_config = st.tabs(["Agenda", "Configurações"])
 
-current_person = select_person_for_date(today_wd, current_queue, daily_assignments, preferences, rotation_offset)
-st.success(f"## {current_person} decide onde vamos almoçar hoje!")
-# Layout
-col_main, col_controls = st.columns([0.7, 0.3])
+with tab_agenda:
+    # Today and schedule
+    today = datetime.now().date()
+    today_wd = get_next_weekday(today)
+    st.info(f"Hoje: {today.strftime('%d/%m/%Y')}")
 
-with col_main:
-    st.markdown("### Próximos Dias")
-    days_to_show = st.slider("Dias para mostrar:", min_value=5, max_value=20, value=12)
+    # Simulate for consistency across UI
+    sim_days = 60
+    schedule = simulate_schedule(today_wd, sim_days, current_queue, daily_assignments, preferences, rotation_offset)
+    current_person = schedule[0][1]
+    st.success(f"## {current_person} decide onde vamos almoçar hoje!")
 
-    rows = []
-    cur_date = today_wd
-    prev_cycle = None
-    for i in range(days_to_show):
-        cyc = cycle_index_for_date(cur_date, len(current_queue), rotation_offset)
-        person = select_person_for_date(cur_date, current_queue, daily_assignments, preferences, rotation_offset)
+    # Layout: main + compact controls
+    col_main, col_controls = st.columns([0.72, 0.28])
 
-        cycle_marker = ""
-        if prev_cycle is not None and cyc != prev_cycle:
-            cycle_marker = " 🔄"
-        prev_cycle = cyc
+    with col_main:
+        st.markdown("### Próximos Dias")
+        with st.container():
+            days_to_show = st.slider("Dias para mostrar:", min_value=5, max_value=20, value=12, label_visibility="collapsed")
+            rows = []
+            prev_cycle = None
+            for i in range(days_to_show):
+                d, p = schedule[i]
+                cyc = cycle_index_for_date(d, len(current_queue), rotation_offset)
+                cycle_marker = "" if (prev_cycle is None or cyc == prev_cycle) else " 🔄"
+                prev_cycle = cyc
+                rows.append({
+                    "Data": d.strftime("%d/%m"),
+                    "Dia": DAY_NAMES_PT[d.weekday()],
+                    "Pessoa": p + cycle_marker
+                })
+            df_queue = pd.DataFrame(rows)
 
-        rows.append({
-            "Data": cur_date.strftime("%d/%m"),
-            "Dia": DAY_NAMES_PT[cur_date.weekday()],
-            "Pessoa": person + cycle_marker
-        })
-        cur_date = get_next_weekday(cur_date + timedelta(days=1))
+            def highlight_today(s: pd.Series):
+                return ['background-color: #90EE90; font-weight: bold'] * len(s) if s.name == 0 else [''] * len(s)
 
-    df_queue = pd.DataFrame(rows)
+            st.dataframe(df_queue.style.apply(highlight_today, axis=1), use_container_width=True, hide_index=True)
+            st.caption("🔄 = Novo ciclo")
 
-    def highlight_today(s: pd.Series):
-        return ['background-color: #90EE90; font-weight: bold'] * len(s) if s.name == 0 else [''] * len(s)
+    with col_controls:
+        st.markdown("### Controles")
+        st.markdown('<div class="card-tight">', unsafe_allow_html=True)
+        # Three compact buttons with sleek icons
+        b1, b2, b3 = st.columns([1,1,1])
+        with b1:
+            pass_turn = st.button("⏭", use_container_width=True, help="Passar vez (pular a pessoa de hoje neste loop)")
+        with b2:
+            skip_day = st.button("🚫", use_container_width=True, help="Pular o dia (Ninguém hoje; adia a rotação)")
+        with b3:
+            # Determine tomorrow from simulation for consistency
+            if len(schedule) >= 2:
+                tomorrow_person = schedule[1][1]
+            else:
+                tomorrow_person = select_person_for_date(get_next_weekday(today_wd + timedelta(days=1)),
+                                                         current_queue, daily_assignments, preferences, rotation_offset)
+            do_switch = st.button("⇄", use_container_width=True, help="Trocar hoje com amanhã")
 
-    st.dataframe(df_queue.style.apply(highlight_today, axis=1), use_container_width=True, hide_index=True)
-    st.caption("🔄 = Novo ciclo | Passar vez remove somente este loop (ajusta a rotação) | Trocar posição altera a fila permanentemente")
-
-with col_controls:
-    st.markdown("### ⚙️ Controles")
-
-    # Pass Turn: remove only for this loop by shifting rotation phase +1 from today onward
-    if st.button(f"⏭️ Passar vez hoje (pular {current_person} neste loop)", type="primary", use_container_width=True):
-        n = len(current_queue)
-        if n > 1:
-            st.session_state.rotation_offset = (rotation_offset + 1) % n
-            save_rotation_state(st.session_state.rotation_offset)
-            # Clear manual override for today since the assignment is recalculated
-            ds = today_wd.strftime("%Y-%m-%d")
-            if ds in st.session_state.daily_assignments:
-                st.session_state.daily_assignments.pop(ds, None)
-                save_daily_assignments(st.session_state.daily_assignments)
-        st.rerun()
-
-    # Switch: swap today with "tomorrow" permanently
-    tomorrow_date = get_next_weekday(today_wd + timedelta(days=1))
-    tomorrow_person = select_person_for_date(tomorrow_date, current_queue, daily_assignments, preferences, rotation_offset)
-    if st.button(f"🔄 Trocar posição ({current_person} ↔ {tomorrow_person})", type="secondary", use_container_width=True):
-        st.session_state.current_queue = switch_persons(current_queue, current_person, tomorrow_person)
-        save_current_queue(st.session_state.current_queue)
-        st.rerun()
-
-    st.markdown("---")
-
-    # Temporary manual override for today
-    st.markdown("Escolha manual para hoje (temporário):")
-    try:
-        current_person_index = current_queue.index(current_person)
-    except ValueError:
-        current_person_index = 0
-    selected_person = st.selectbox("Pessoa:", current_queue, index=current_person_index, key="manual_select")
-
-    if st.button("✅ Confirmar", use_container_width=True):
-        if selected_person != current_person:
-            st.session_state.daily_assignments[today_wd.strftime("%Y-%m-%d")] = selected_person
-            save_daily_assignments(st.session_state.daily_assignments)
+        # Action handlers (logic unchanged)
+        if pass_turn:
+            n = len(current_queue)
+            if n > 1:
+                st.session_state.rotation_offset = (rotation_offset + 1) % n
+                save_rotation_state(st.session_state.rotation_offset)
+                ds = today_wd.strftime("%Y-%m-%d")
+                if ds in st.session_state.daily_assignments:
+                    st.session_state.daily_assignments.pop(ds, None)
+                    save_daily_assignments(st.session_state.daily_assignments)
             st.rerun()
 
-    st.markdown("---")
+        if skip_day:
+            ds = today_wd.strftime("%Y-%m-%d")
+            st.session_state.daily_assignments[ds] = "Ninguém"
+            save_daily_assignments(st.session_state.daily_assignments)
+            n = len(current_queue)
+            if n > 0:
+                st.session_state.rotation_offset = (rotation_offset - 1) % n
+                save_rotation_state(st.session_state.rotation_offset)
+            st.rerun()
 
-    # Reset buttons
-    if st.button("🔄 Resetar fila original", use_container_width=True):
-        st.session_state.current_queue = ORIGINAL_QUEUE.copy()
-        save_current_queue(st.session_state.current_queue)
-        # Recompute rotation offset so ANCHOR_PERSON is assigned on ANCHOR_DATE
+        if do_switch:
+            new_q = current_queue.copy()
+            if current_person in new_q and tomorrow_person in new_q:
+                i1, i2 = new_q.index(current_person), new_q.index(tomorrow_person)
+                new_q[i1], new_q[i2] = new_q[i2], new_q[i1]
+                apply_queue_change(new_q, realign_anchor=False)
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        # Compact temporary manual override
+        st.markdown("#### Manual (Hoje)")
+        st.markdown('<div class="card-tight">', unsafe_allow_html=True)
         try:
-            idx = st.session_state.current_queue.index(ANCHOR_PERSON)
+            current_person_index = current_queue.index(current_person)
         except ValueError:
-            idx = 0
-        st.session_state.rotation_offset = idx
-        save_rotation_state(idx)
-        st.rerun()
+            current_person_index = 0
+        selected_person = st.selectbox("Escolha:", current_queue, index=current_person_index, key="manual_select", label_visibility="collapsed")
+        col_ok, col_reset = st.columns([1,1])
+        with col_ok:
+            if st.button("✓", use_container_width=True, help="Confirmar escolha manual para hoje"):
+                if selected_person != current_person:
+                    st.session_state.daily_assignments[today_wd.strftime("%Y-%m-%d")] = selected_person
+                    save_daily_assignments(st.session_state.daily_assignments)
+                    st.rerun()
+        with col_reset:
+            if st.button("🧹", use_container_width=True, help="Limpar escolha manual de hoje"):
+                ds = today_wd.strftime("%Y-%m-%d")
+                if ds in st.session_state.daily_assignments:
+                    st.session_state.daily_assignments.pop(ds, None)
+                    save_daily_assignments(st.session_state.daily_assignments)
+                    st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    if st.button("🗑️ Limpar tudo", use_container_width=True):
-        # Reset in-memory
-        st.session_state.current_queue = ORIGINAL_QUEUE.copy()
-        st.session_state.daily_assignments = {}
-        st.session_state.preferences = load_preferences()
-        # Remove files
-        for f in [CURRENT_QUEUE_FILE, DAILY_ASSIGNMENTS_FILE, PREFERENCES_FILE, ROTATION_STATE_FILE]:
-            if os.path.exists(f):
-                os.remove(f)
-        st.rerun()
+        # Compact reset
+        st.markdown("#### Reset")
+        st.markdown('<div class="card-tight">', unsafe_allow_html=True)
+        c1, c2 = st.columns([1,1])
+        with c1:
+            if st.button("⟲", use_container_width=True, help="Restaurar fila original"):
+                apply_queue_change(ORIGINAL_QUEUE.copy(), realign_anchor=True)
+        with c2:
+            if st.button("🗑", use_container_width=True, help="Zerar arquivos e estado"):
+                st.session_state.current_queue = ORIGINAL_QUEUE.copy()
+                st.session_state.daily_assignments = {}
+                st.session_state.preferences = {}
+                for f in [CURRENT_QUEUE_FILE, DAILY_ASSIGNMENTS_FILE, PREFERENCES_FILE, ROTATION_STATE_FILE]:
+                    if os.path.exists(f):
+                        os.remove(f)
+                st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
 
-# Preferences expander
-with st.expander("⚙️ Preferências"):
-    st.markdown("Dias que preferem NÃO decidir (cria troca temporária):")
+    # Predictions table (from simulation to stay consistent with swaps)
+    st.markdown("### 🔮 Próximas Vezes")
+    prediction_rows = []
+    horizon = max(60, 6 * max(1, len(current_queue)))
+    long_schedule = simulate_schedule(today_wd, horizon, current_queue, daily_assignments, preferences, rotation_offset)
+    for person in current_queue:
+        next_dates: List[str] = []
+        for d, p in long_schedule:
+            if p == person:
+                if person == current_person and d == today_wd:
+                    next_dates.append("Hoje")
+                else:
+                    days_until = count_weekdays_between(today_wd, d)
+                    next_dates.append(f"{d.strftime('%d/%m')} (em {max(0, days_until-1)} dias)")
+                if len(next_dates) >= 3:
+                    break
+        while len(next_dates) < 3:
+            next_dates.append("N/A")
 
-    for person in ORIGINAL_QUEUE:
-        current_days = [DAY_NAMES_PT_SHORT[d] for d in preferences.get(person, [])]
-        selected_days = st.multiselect(f"{person}:", DAY_NAMES_PT_SHORT, default=current_days, key=f"pref_{person}")
-        preferences[person] = [DAY_NAMES_PT_SHORT.index(d) for d in selected_days]
+        skip_days_list = [DAY_NAMES_PT_SHORT[d] for d in preferences.get(person, [])]
+        skip_info = ", ".join(skip_days_list) if skip_days_list else "Nenhum"
+        prediction_rows.append({
+            "Pessoa": person,
+            "Próxima": next_dates[0],
+            "Seguinte": next_dates[1],
+            "Depois": next_dates[2],
+            "Evita": skip_info
+        })
 
-    if st.button("💾 Salvar Preferências", use_container_width=True):
-        st.session_state.preferences = preferences
-        save_preferences(preferences)
-        st.success("✅ Preferências salvas!")
-        st.rerun()
+    df_predictions = pd.DataFrame(prediction_rows)
+    def highlight_current(s: pd.Series):
+        return ['background-color: #E8F4FD; font-weight: bold'] * len(s) if s["Pessoa"] == current_person else [''] * len(s)
+    st.dataframe(df_predictions.style.apply(highlight_current, axis=1), use_container_width=True, hide_index=True)
 
-# Predictions table
-st.markdown("### 🔮 Próximas Vezes")
-prediction_rows = []
-for person in current_queue:
-    next_dates: List[str] = []
-    search_date = today_wd
-    for _ in range(60):
-        assigned = select_person_for_date(search_date, current_queue, daily_assignments, preferences, rotation_offset)
-        if assigned == person:
-            if person == current_person and search_date == today_wd:
-                next_dates.append("Hoje")
-            else:
-                days_until = count_weekdays_between(today_wd, search_date)
-                next_dates.append(f"{search_date.strftime('%d/%m')} (em {max(0, days_until-1)} dias)")
-            if len(next_dates) >= 3:
-                break
-        search_date = get_next_weekday(search_date + timedelta(days=1))
+    # Temporary assignments display (simulation for consistent "original" without overrides)
+    temp_overrides = st.session_state.get("daily_assignments", {})
+    if temp_overrides:
+        st.markdown("---")
+        st.markdown("### 📝 Escolhas Manuais (Temporárias)")
+        for date_str, p in sorted(temp_overrides.items()):
+            date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
+            original = simulate_schedule(
+                start_date=date_obj,
+                days=1,
+                current_queue=current_queue,
+                daily_assignments={},  # ignore overrides for baseline
+                preferences=preferences,
+                rotation_offset=rotation_offset
+            )[0][1]
+            if p != original:
+                st.write(f"• {date_obj.strftime('%d/%m')}: {p} (no lugar de {original})")
 
-    while len(next_dates) < 3:
-        next_dates.append("N/A")
+with tab_config:
+    # Sub-tabs: Preferências first to make it the focus, with an interactive grid
+    pref_tab, fila_tab = st.tabs(["Preferências", "Fila"])
 
-    skip_days_list = [DAY_NAMES_PT_SHORT[d] for d in preferences.get(person, [])]
-    skip_info = ", ".join(skip_days_list) if skip_days_list else "Nenhum"
-    prediction_rows.append({
-        "Pessoa": person,
-        "Próxima": next_dates[0],
-        "Seguinte": next_dates[1],
-        "Depois": next_dates[2],
-        "Evita": skip_info
-    })
+    with pref_tab:
+        st.markdown("#### Preferências por dia (clique para alternar)")
+        st.markdown('<div class="card">', unsafe_allow_html=True)
 
-df_predictions = pd.DataFrame(prediction_rows)
+        # Build editable grid: one row per person, five checkbox columns (Seg..Sex)
+        # Pref value True means "avoid that weekday".
+        grid_cols = ["Pessoa"] + DAY_NAMES_PT_SHORT
+        # Prepare data
+        data_rows = []
+        for person in current_queue:
+            avoid = set(preferences.get(person, []))
+            row = {
+                "Pessoa": person,
+                "Seg": 0 in avoid,
+                "Ter": 1 in avoid,
+                "Qua": 2 in avoid,
+                "Qui": 3 in avoid,
+                "Sex": 4 in avoid,
+            }
+            data_rows.append(row)
+        df_pref = pd.DataFrame(data_rows, columns=grid_cols)
 
-def highlight_current(s: pd.Series):
-    return ['background-color: #E8F4FD; font-weight: bold'] * len(s) if s["Pessoa"] == current_person else [''] * len(s)
+        edited = st.data_editor(
+            df_pref,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Pessoa": st.column_config.TextColumn("Pessoa", disabled=True),
+                "Seg": st.column_config.CheckboxColumn("Seg", help="Evitar segunda"),
+                "Ter": st.column_config.CheckboxColumn("Ter", help="Evitar terça"),
+                "Qua": st.column_config.CheckboxColumn("Qua", help="Evitar quarta"),
+                "Qui": st.column_config.CheckboxColumn("Qui", help="Evitar quinta"),
+                "Sex": st.column_config.CheckboxColumn("Sex", help="Evitar sexta"),
+            }
+        )
 
-st.dataframe(df_predictions.style.apply(highlight_current, axis=1), use_container_width=True, hide_index=True)
+        # Quick presets row
+        c_all, c_none, c_tue_fri = st.columns([1,1,1])
+        if c_all.button("✚ Marcar todos"):
+            for d in DAY_NAMES_PT_SHORT:
+                edited[d] = True
+        if c_none.button("⌫ Limpar todos"):
+            for d in DAY_NAMES_PT_SHORT:
+                edited[d] = False
+        if c_tue_fri.button("✓ Ter/Sex"):
+            for d in DAY_NAMES_PT_SHORT:
+                edited[d] = (d in ["Ter", "Sex"])
 
-# Temporary assignments display
-if daily_assignments:
-    st.markdown("---")
-    st.markdown("### 📝 Escolhas Manuais (Temporárias)")
-    for date_str, p in sorted(daily_assignments.items()):
-        date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
-        # Compute original without overrides
-        original = select_person_for_date(date_obj, current_queue, {}, preferences, rotation_offset)
-        if p != original:
-            st.write(f"• {date_obj.strftime('%d/%m')}: {p} (no lugar de {original})")
+        # Save/Reset
+        s1, s2 = st.columns([1,1])
+        with s1:
+            if st.button("💾 Salvar preferências", use_container_width=True):
+                # Convert edited grid back to dict
+                new_prefs: Dict[str, List[int]] = {}
+                for _, r in edited.iterrows():
+                    days = []
+                    for idx, short in enumerate(DAY_NAMES_PT_SHORT):
+                        if bool(r[short]):
+                            days.append(idx)
+                    new_prefs[str(r["Pessoa"])] = days
+                # Clean up for removed people (if any got out of sync)
+                for k in list(new_prefs.keys()):
+                    if k not in current_queue:
+                        new_prefs.pop(k, None)
+                st.session_state.preferences = new_prefs
+                save_preferences(new_prefs)
+                st.success("Preferências salvas!")
+                st.rerun()
+        with s2:
+            if st.button("↺ Resetar preferências", use_container_width=True):
+                st.session_state.preferences = {}
+                save_preferences({})
+                st.rerun()
+
+        st.markdown('</div>', unsafe_allow_html=True)
+        st.caption("Dica: marque os dias que a pessoa prefere não decidir. A troca é automática só naquele dia.")
+
+    with fila_tab:
+        st.markdown("#### Gestão da fila (compacto)")
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+
+        # Add / Remove side-by-side
+        a, b = st.columns([1,1])
+        with a:
+            st.markdown("Adicionar")
+            new_name = st.text_input("Nome", value="", placeholder="Ex.: João", label_visibility="collapsed", key="add_name")
+            if st.button("✚ Adicionar", use_container_width=True):
+                candidate = new_name.strip()
+                if candidate:
+                    existing_lower = [p.lower() for p in current_queue]
+                    if candidate.lower() in existing_lower:
+                        st.warning("Nome já existe.")
+                    else:
+                        apply_queue_change(current_queue + [candidate], realign_anchor=True)
+                else:
+                    st.warning("Informe um nome válido.")
+        with b:
+            st.markdown("Remover")
+            to_remove = st.multiselect("Selecionar", current_queue, [], label_visibility="collapsed")
+            if st.button("✖ Remover", use_container_width=True, disabled=(len(to_remove) == 0)):
+                new_q = [p for p in current_queue if p not in set(to_remove)]
+                if len(new_q) == 0:
+                    st.warning("A fila não pode ficar vazia.")
+                else:
+                    apply_queue_change(new_q, realign_anchor=True)
+
+        st.markdown("---")
+
+        # Reorder compact
+        st.markdown("Reordenar")
+        if len(current_queue) > 0:
+            col_p, col_btns = st.columns([0.6, 0.4])
+            with col_p:
+                person_to_move = st.selectbox("Pessoa", current_queue, key="person_to_move_cfg", label_visibility="collapsed")
+            with col_btns:
+                up, down = st.columns(2)
+                with up:
+                    can_up = current_queue.index(person_to_move) > 0
+                    if st.button("⬆", use_container_width=True, disabled=not can_up):
+                        idx = current_queue.index(person_to_move)
+                        new_q = move_person(current_queue, person_to_move, idx - 1)
+                        apply_queue_change(new_q, realign_anchor=True)
+                with down:
+                    can_down = current_queue.index(person_to_move) < len(current_queue) - 1
+                    if st.button("⬇", use_container_width=True, disabled=not can_down):
+                        idx = current_queue.index(person_to_move)
+                        new_q = move_person(current_queue, person_to_move, idx + 1)
+                        apply_queue_change(new_q, realign_anchor=True)
+
+            # Direct position set (optional, compact)
+            setpos_col1, setpos_col2 = st.columns([0.6, 0.4])
+            with setpos_col1:
+                st.caption(f"Atual: {current_queue.index(person_to_move)+1}/{len(current_queue)}")
+            with setpos_col2:
+                target_pos = st.number_input("Posição", min_value=1, max_value=len(current_queue),
+                                             value=current_queue.index(person_to_move)+1, step=1,
+                                             label_visibility="collapsed")
+                if st.button("↕ Mover", use_container_width=True):
+                    new_q = move_person(current_queue, person_to_move, int(target_pos)-1)
+                    apply_queue_change(new_q, realign_anchor=True)
+
+        st.markdown('</div>', unsafe_allow_html=True)
+        st.caption("Mudanças de ordem e nomes realinham a rotação para manter o início em 09/10/2025 com Pavel.")
